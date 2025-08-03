@@ -32,6 +32,8 @@ let isAutomationRunning = false;
 let currentScript = '';
 // Removed: uploadedFilesList - file upload functionality removed
 let chatMinimized = false;
+let browserViewWindow = null;
+let currentSessionId = null;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
@@ -112,7 +114,17 @@ socket.on('sessionInfo', (data) => {
 
 socket.on('error', (data) => {
     addLogEntry(`Error: ${data.message}`, 'error');
-    addChatMessage(`I encountered an error: ${data.message}. Please let me know if you'd like me to try again.`, 'ai');
+    
+    // Handle quota exceeded errors specifically
+    if (data.code === 'QUOTA_EXCEEDED' || data.message.includes('quota')) {
+        addChatMessage(`⚠️ I've reached my daily AI quota limit. This happens when I've analyzed too many requests today. Please try again tomorrow, or consider upgrading the Gemini API plan for more requests.`, 'ai');
+        addActivityMessage('Daily AI quota exceeded - automation paused', 'error');
+        
+        // Fetch and display quota status
+        fetchQuotaStatus();
+    } else {
+        addChatMessage(`I encountered an error: ${data.message}. Please let me know if you'd like me to try again.`, 'ai');
+    }
     hideLoading();
     isAutomationRunning = false;
     updateButtons();
@@ -168,6 +180,18 @@ socket.on('analysisResult', (data) => {
 socket.on('activityUpdate', (data) => {
     const { type, message } = data;
     addActivityMessage(message, type);
+    
+    // Auto-open browser view when session starts
+    if (message.includes('🎬 Watch live automation:')) {
+        const urlMatch = message.match(/sessions\/([a-f0-9-]+)/);
+        if (urlMatch) {
+            const sessionId = urlMatch[1];
+            // Small delay to ensure session is ready
+            setTimeout(() => {
+                openBrowserView(sessionId);
+            }, 2000);
+        }
+    }
 });
 
 // New socket events for autonomous task execution
@@ -190,7 +214,7 @@ socket.on('taskProgress', (data) => {
 });
 
 socket.on('taskComplete', (data) => {
-    const { success, duration, stepsCompleted, finalUrl, confidence } = data;
+    const { success, duration, stepsCompleted, finalUrl, confidence, sessionId, replayUrl } = data;
     
     isAutomationRunning = false;
     updateButtons();
@@ -205,6 +229,15 @@ socket.on('taskComplete', (data) => {
     
     if (finalUrl) {
         addChatMessage(`🌐 Final page: ${finalUrl}`, 'ai');
+    }
+    
+    // Add replay URL for viewing the automation
+    if (replayUrl) {
+        addChatMessage(`🎬 [Watch Automation Replay](${replayUrl})`, 'ai');
+        addActivityMessage(`Session replay available: ${replayUrl}`, 'info');
+    } else if (sessionId) {
+        const fallbackUrl = `https://app.browserbase.com/sessions/${sessionId}`;
+        addChatMessage(`🎬 [Watch Automation Replay](${fallbackUrl})`, 'ai');
     }
 });
 
@@ -292,15 +325,17 @@ function processUserMessage(message) {
     
     // Check for autonomous task keywords
     const autonomousKeywords = [
-        'play', 'search for', 'find', 'book', 'apply', 'buy', 'order', 
+        'play', 'search', 'search for', 'find', 'book', 'apply', 'buy', 'order', 
         'download', 'upload', 'fill', 'submit', 'register', 'login',
-        'navigate to', 'go to', 'visit', 'open', 'complete', 'automate'
+        'navigate to', 'go to', 'visit', 'open', 'complete', 'automate',
+        'watch', 'browse', 'explore', 'look for'
     ];
     
     const isAutonomousTask = autonomousKeywords.some(keyword => 
         lowerMessage.includes(keyword)
     ) || lowerMessage.includes('flight') || lowerMessage.includes('job') || 
-       lowerMessage.includes('music') || lowerMessage.includes('bollywood');
+       lowerMessage.includes('music') || lowerMessage.includes('bollywood') ||
+       lowerMessage.includes('chatgpt') || lowerMessage.includes('youtube');
     
     if (isAutonomousTask) {
         // Use Enhanced BrowserAgent for autonomous execution
@@ -574,5 +609,124 @@ function addLogEntry(message, type = 'info') {
     addActivityMessage(message, type);
 }
 
+// Browser View Window Functions
+async function openBrowserView(sessionId) {
+    try {
+        // Get debug info from Browserbase
+        const response = await fetch(`/api/session/${sessionId}/debug`);
+        const debugInfo = await response.json();
+        
+        if (debugInfo.debuggerFullscreenUrl) {
+            // Update the browser view panel instead of opening new window
+            const browserView = document.getElementById('browserView');
+            const placeholder = browserView.querySelector('.placeholder');
+            
+            if (placeholder) {
+                // Replace placeholder with iframe
+                browserView.innerHTML = `
+                    <iframe 
+                        src="${debugInfo.debuggerFullscreenUrl}"
+                        style="width: 100%; height: 100%; border: none;"
+                        title="Live Browser Automation">
+                    </iframe>
+                    <div class="browser-view-controls">
+                        <button onclick="refreshBrowserView('${sessionId}')" class="btn btn-small">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                        <button onclick="openExternalBrowserView('${sessionId}')" class="btn btn-small">
+                            <i class="fas fa-external-link-alt"></i> Open in New Window
+                        </button>
+                    </div>
+                `;
+                
+                currentSessionId = sessionId;
+                addActivityMessage('🎬 Live browser view loaded in panel!', 'success');
+            }
+        } else {
+            throw new Error('Debug URL not available');
+        }
+    } catch (error) {
+        console.error('Failed to load browser view:', error);
+        addActivityMessage('⚠️ Failed to load live browser view. Using external link.', 'warning');
+        
+        // Show error in browser panel
+        const browserView = document.getElementById('browserView');
+        browserView.innerHTML = `
+            <div class="placeholder error">
+                <i class="fas fa-exclamation-triangle"></i>
+                <h3>Browser View Unavailable</h3>
+                <p>Unable to load live view. Click below to open externally.</p>
+                <button onclick="openExternalBrowserView('${sessionId}')" class="btn btn-primary">
+                    <i class="fas fa-external-link-alt"></i> Open External View
+                </button>
+            </div>
+        `;
+    }
+}
+
+function refreshBrowserView(sessionId) {
+    if (sessionId) {
+        openBrowserView(sessionId);
+    }
+}
+
+function openExternalBrowserView(sessionId) {
+    const fallbackUrl = `https://app.browserbase.com/sessions/${sessionId}`;
+    window.open(fallbackUrl, '_blank');
+}
+
+function reopenBrowserView() {
+    if (currentSessionId) {
+        openBrowserView(currentSessionId);
+    }
+}
+
+function closeBrowserView() {
+    const browserView = document.getElementById('browserView');
+    browserView.innerHTML = `
+        <div class="placeholder">
+            <i class="fas fa-globe"></i>
+            <h3>Ready to Start</h3>
+            <p>Ask Dyna to automate a web task to begin</p>
+        </div>
+    `;
+    currentSessionId = null;
+}
+
 // Initialize on load
 updateButtons();
+
+// Quota management functions
+async function fetchQuotaStatus() {
+    try {
+        const response = await fetch('/api/quota-status');
+        const quotaData = await response.json();
+        
+        displayQuotaStatus(quotaData);
+        return quotaData;
+    } catch (error) {
+        console.error('Failed to fetch quota status:', error);
+        return null;
+    }
+}
+
+function displayQuotaStatus(quotaData) {
+    const quotaInfo = `
+        <div class="quota-status">
+            <h4>📊 AI Usage Today</h4>
+            <div class="quota-bar">
+                <div class="quota-fill" style="width: ${(quotaData.apiCallsUsed / quotaData.maxCalls) * 100}%"></div>
+            </div>
+            <p>${quotaData.apiCallsUsed} / ${quotaData.maxCalls} requests used</p>
+            <p class="quota-remaining">${quotaData.remaining} requests remaining</p>
+            ${quotaData.queueLength > 0 ? `<p class="quota-queue">⏳ ${quotaData.queueLength} requests queued</p>` : ''}
+        </div>
+    `;
+    
+    addChatMessage(quotaInfo, 'system');
+}
+
+// Check quota status on page load (after initialization)
+setTimeout(() => {
+    fetchQuotaStatus();
+}, 3000);

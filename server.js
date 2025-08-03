@@ -44,10 +44,113 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
 
-// Initialize Gemini AI
+// Initialize Gemini AI with rate limiting and fallback
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-const visionModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const model = genAI.getGenerativeModel({ 
+  model: "gemini-1.5-flash",
+  generationConfig: {
+    temperature: 0.7,
+    topK: 1,
+    topP: 1,
+    maxOutputTokens: 2048,
+  }
+});
+const visionModel = genAI.getGenerativeModel({ 
+  model: "gemini-1.5-flash",
+  generationConfig: {
+    temperature: 0.7,
+    topK: 1,
+    topP: 1,
+    maxOutputTokens: 2048,
+  }
+});
+
+// Rate limiting and quota management
+let apiCallCount = 0;
+let lastResetTime = new Date().getDate();
+const MAX_DAILY_CALLS = 45; // Leave buffer for safety
+const RATE_LIMIT_DELAY = 2000; // 2 seconds between calls
+
+// Request queue for rate limiting
+let requestQueue = [];
+let isProcessingQueue = false;
+
+// Check and manage API quota
+function checkApiQuota() {
+  const currentDate = new Date().getDate();
+  
+  // Reset counter if it's a new day
+  if (currentDate !== lastResetTime) {
+    apiCallCount = 0;
+    lastResetTime = currentDate;
+    console.log('🔄 Daily API quota reset');
+  }
+  
+  return apiCallCount < MAX_DAILY_CALLS;
+}
+
+// Rate-limited API call wrapper
+async function makeRateLimitedApiCall(apiFunction, ...args) {
+  return new Promise((resolve, reject) => {
+    requestQueue.push({ apiFunction, args, resolve, reject });
+    processQueue();
+  });
+}
+
+// Process API request queue with rate limiting
+async function processQueue() {
+  if (isProcessingQueue || requestQueue.length === 0) return;
+  
+  isProcessingQueue = true;
+  
+  while (requestQueue.length > 0) {
+    const { apiFunction, args, resolve, reject } = requestQueue.shift();
+    
+    try {
+      // Check quota before making call
+      if (!checkApiQuota()) {
+        const error = new Error('Daily API quota exceeded. Please try again tomorrow or upgrade your plan.');
+        error.code = 'QUOTA_EXCEEDED';
+        reject(error);
+        continue;
+      }
+      
+      // Make the API call
+      const result = await apiFunction(...args);
+      apiCallCount++;
+      
+      console.log(`📊 API calls used today: ${apiCallCount}/${MAX_DAILY_CALLS}`);
+      
+      resolve(result);
+      
+      // Rate limiting delay
+      if (requestQueue.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
+      }
+      
+    } catch (error) {
+      // Handle different types of errors
+      if (error.message.includes('429') || error.message.includes('quota')) {
+        console.error('⚠️ API quota exceeded:', error.message);
+        error.code = 'QUOTA_EXCEEDED';
+        
+        // Stop processing queue on quota error
+        isProcessingQueue = false;
+        reject(error);
+        return;
+      } else if (error.message.includes('rate limit')) {
+        console.log('⏱️ Rate limited, waiting before retry...');
+        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+        requestQueue.unshift({ apiFunction, args, resolve, reject }); // Put back at front
+        continue;
+      }
+      
+      reject(error);
+    }
+  }
+  
+  isProcessingQueue = false;
+}
 
 // Initialize BrowserAgent
 const BrowserAgent = require('./lib/BrowserAgent');
@@ -154,71 +257,79 @@ async function processImageQueue() {
   isProcessingImages = false;
 }
 
-// Analyze image with Gemini Vision
+// Analyze image with Gemini Vision (with rate limiting)
 async function analyzeImage(imageData) {
-  try {
-    const prompt = `Analyze this screenshot of a web page. Describe:
-    1. What elements are visible (buttons, forms, text, images)
-    2. The current state of the page
-    3. Any interactive elements that could be automated
-    4. Suggestions for possible actions
-    
-    Be concise but thorough in your analysis.`;
+  const apiCall = async () => {
+    try {
+      const prompt = `Analyze this screenshot of a web page. Describe:
+      1. What elements are visible (buttons, forms, text, images)
+      2. The current state of the page
+      3. Any interactive elements that could be automated
+      4. Suggestions for possible actions
+      
+      Be concise but thorough in your analysis.`;
 
-    const result = await visionModel.generateContent([
-      prompt,
-      {
-        inlineData: {
-          data: imageData.split(',')[1], // Remove data:image/jpeg;base64, prefix
-          mimeType: 'image/jpeg'
+      const result = await visionModel.generateContent([
+        prompt,
+        {
+          inlineData: {
+            data: imageData.split(',')[1], // Remove data:image/jpeg;base64, prefix
+            mimeType: 'image/jpeg'
+          }
         }
-      }
-    ]);
+      ]);
 
-    return {
-      analysis: result.response.text(),
-      timestamp: new Date().toISOString()
-    };
-  } catch (error) {
-    console.error('Gemini Vision API error:', error);
-    throw error;
-  }
+      return {
+        analysis: result.response.text(),
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('Gemini Vision API error:', error);
+      throw error;
+    }
+  };
+
+  return makeRateLimitedApiCall(apiCall);
 }
 
-// Generate automation script with Gemini
+// Generate automation script with Gemini (with rate limiting)
 async function generateAutomationScript(task, context = '') {
-  try {
-    const prompt = `Generate a Playwright automation script for the following task: "${task}"
-    
-    Context: ${context}
-    
-    Return a JavaScript function that uses Playwright to accomplish this task. 
-    The function should be named 'automateTask' and accept a 'page' parameter.
-    Include error handling and detailed comments.
-    Use Playwright syntax (not Puppeteer).
-    
-    Example format:
-    async function automateTask(page) {
-      try {
-        // Your automation code here
-        await page.goto('https://example.com');
-        await page.waitForLoadState('networkidle');
-        // Use Playwright selectors and methods
-        await page.click('button[type="submit"]');
-        await page.fill('input[name="search"]', 'search term');
-        // ... more steps
-        return { success: true, message: 'Task completed successfully' };
-      } catch (error) {
-        return { success: false, error: error.message };
-      }
-    }`;
+  const apiCall = async () => {
+    try {
+      const prompt = `Generate a Playwright automation script for the following task: "${task}"
+      
+      Context: ${context}
+      
+      Return a JavaScript function that uses Playwright to accomplish this task. 
+      The function should be named 'automateTask' and accept a 'page' parameter.
+      Include error handling and detailed comments.
+      Use Playwright syntax (not Puppeteer).
+      
+      Example format:
+      async function automateTask(page) {
+        try {
+          // Your automation code here
+          await page.goto('https://example.com');
+          await page.waitForLoadState('networkidle');
+          // Use Playwright selectors and methods
+          await page.click('button[type="submit"]');
+          await page.fill('input[name="search"]', 'search term');
+          // ... more steps
+          return { success: true, message: 'Task completed successfully' };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      }`;
 
-    const result = await model.generateContent(prompt);
-    return result.response.text();
-  } catch (error) {
-    console.error('Script generation error:', error);
-    throw error;
-  }
+      const result = await model.generateContent(prompt);
+      return result.response.text();
+    } catch (error) {
+      console.error('Script generation error:', error);
+      throw error;
+    }
+  };
+
+  return makeRateLimitedApiCall(apiCall);
 }
 
 // Socket.io connection handling
@@ -372,11 +483,33 @@ io.on('connection', (socket) => {
         });
       };
       
+      const sessionCallback = (sessionInfo) => {
+        if (sessionInfo.replayUrl) {
+          socket.emit('activityUpdate', {
+            type: 'info',
+            message: `🎬 Watch live automation: ${sessionInfo.replayUrl}`
+          });
+        }
+      };
+      
       // Execute the autonomous task
       const result = await enhancedAgent.executeAutonomousTask(taskDescription, {
         ...options,
-        progressCallback
+        progressCallback,
+        sessionCallback
       });
+      
+      // Get session info for viewing
+      const sessionInfo = enhancedAgent.session;
+      const replayUrl = sessionInfo?.replayUrl || (sessionInfo?.id ? `https://app.browserbase.com/sessions/${sessionInfo.id}` : null);
+      
+      // Send session info for immediate viewing
+      if (replayUrl) {
+        socket.emit('activityUpdate', {
+          type: 'info',
+          message: `🎬 Watch live automation: ${replayUrl}`
+        });
+      }
       
       // Send completion result
       socket.emit('taskComplete', {
@@ -384,7 +517,9 @@ io.on('connection', (socket) => {
         duration: result.duration,
         stepsCompleted: result.stepsCompleted,
         finalUrl: result.finalUrl,
-        confidence: result.confidence
+        confidence: result.confidence,
+        sessionId: sessionInfo?.id,
+        replayUrl: replayUrl
       });
       
       socket.emit('activityUpdate', {
@@ -408,11 +543,24 @@ io.on('connection', (socket) => {
 
     } catch (error) {
       console.error('Autonomous task error:', error);
-      socket.emit('error', { message: error.message });
-      socket.emit('activityUpdate', {
-        type: 'error',
-        message: `Autonomous task failed: ${error.message}`
-      });
+      
+      // Handle quota exceeded errors specifically
+      if (error.code === 'QUOTA_EXCEEDED' || error.message.includes('quota')) {
+        socket.emit('error', { 
+          message: 'Daily AI quota exceeded. Please try again tomorrow or consider upgrading your Gemini API plan.',
+          code: 'QUOTA_EXCEEDED'
+        });
+        socket.emit('activityUpdate', {
+          type: 'error',
+          message: `⚠️ AI quota exceeded - automation paused. Used ${apiCallCount}/${MAX_DAILY_CALLS} calls today.`
+        });
+      } else {
+        socket.emit('error', { message: error.message });
+        socket.emit('activityUpdate', {
+          type: 'error',
+          message: `Autonomous task failed: ${error.message}`
+        });
+      }
     }
   });
 
@@ -549,25 +697,99 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Get session debug info for live browser view
+app.get('/api/session/:sessionId/debug', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    const response = await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}/debug`, {
+      method: 'GET',
+      headers: {
+        'X-BB-API-Key': process.env.BROWSERBASE_API_KEY
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Browserbase API error: ${response.status}`);
+    }
+    
+    const debugInfo = await response.json();
+    res.json(debugInfo);
+    
+  } catch (error) {
+    console.error('Error fetching session debug info:', error);
+    res.status(500).json({ error: 'Failed to fetch session debug info' });
+  }
+});
+
+// Get API quota status
+app.get('/api/quota-status', (req, res) => {
+  const currentDate = new Date().getDate();
+  
+  // Reset counter if it's a new day
+  if (currentDate !== lastResetTime) {
+    apiCallCount = 0;
+    lastResetTime = currentDate;
+  }
+  
+  res.json({
+    apiCallsUsed: apiCallCount,
+    maxCalls: MAX_DAILY_CALLS,
+    remaining: MAX_DAILY_CALLS - apiCallCount,
+    resetDate: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() + 1).toISOString(),
+    canMakeRequests: apiCallCount < MAX_DAILY_CALLS,
+    queueLength: requestQueue.length
+  });
+});
+
 app.post('/api/analyze-text', async (req, res) => {
   try {
     const { text, task } = req.body;
     
-    const prompt = `Analyze the following text in the context of the task: "${task}"
+    // Check quota before processing
+    if (!checkApiQuota()) {
+      return res.status(429).json({ 
+        success: false, 
+        error: 'Daily API quota exceeded. Please try again tomorrow.',
+        code: 'QUOTA_EXCEEDED',
+        apiCallsUsed: apiCallCount,
+        maxCalls: MAX_DAILY_CALLS
+      });
+    }
     
-    Text: ${text}
-    
-    Provide insights on how this text relates to the automation task and suggest next steps.`;
+    const apiCall = async () => {
+      const prompt = `Analyze the following text in the context of the task: "${task}"
+      
+      Text: ${text}
+      
+      Provide insights on how this text relates to the automation task and suggest next steps.`;
 
-    const result = await model.generateContent(prompt);
+      const result = await model.generateContent(prompt);
+      return result.response.text();
+    };
+
+    const analysis = await makeRateLimitedApiCall(apiCall);
     
     res.json({
       success: true,
-      analysis: result.response.text()
+      analysis: analysis,
+      apiCallsUsed: apiCallCount,
+      maxCalls: MAX_DAILY_CALLS
     });
   } catch (error) {
     console.error('Text analysis error:', error);
-    res.status(500).json({ success: false, error: error.message });
+    
+    if (error.code === 'QUOTA_EXCEEDED') {
+      res.status(429).json({ 
+        success: false, 
+        error: 'Daily API quota exceeded. Please try again tomorrow.',
+        code: 'QUOTA_EXCEEDED',
+        apiCallsUsed: apiCallCount,
+        maxCalls: MAX_DAILY_CALLS
+      });
+    } else {
+      res.status(500).json({ success: false, error: error.message });
+    }
   }
 });
 
