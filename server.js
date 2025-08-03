@@ -51,7 +51,9 @@ const visionModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // Initialize BrowserAgent
 const BrowserAgent = require('./lib/BrowserAgent');
+const EnhancedBrowserAgent = require('./lib/EnhancedBrowserAgent');
 let browserAgent = null;
+let enhancedAgent = null;
 
 // Global variables
 let browser = null;
@@ -98,12 +100,32 @@ async function initBrowser() {
       console.log('1. Copy .env.example to .env');
       console.log('2. Add your Browserbase API key: BROWSERBASE_API_KEY=your_key');
       console.log('3. Add your Browserbase Project ID: BROWSERBASE_PROJECT_ID=your_project');
-      console.log('4. Add your Gemini API key: GEMINI_API_KEY=your_key');
-      console.log('5. Restart the server\n');
     }
     
-    // Don't throw error - let server start without browser agent
-    return null;
+    throw error;
+  }
+}
+
+// Initialize Enhanced BrowserAgent for autonomous tasks
+async function initEnhancedAgent() {
+  try {
+    console.log('Initializing Enhanced BrowserAgent...');
+    
+    enhancedAgent = new EnhancedBrowserAgent({
+      browserbaseApiKey: process.env.BROWSERBASE_API_KEY,
+      browserbaseProjectId: process.env.BROWSERBASE_PROJECT_ID,
+      geminiApiKey: process.env.GEMINI_API_KEY,
+      enableLogging: true
+    });
+    
+    await enhancedAgent.initialize();
+    
+    console.log('Enhanced BrowserAgent initialized successfully');
+    return enhancedAgent;
+  } catch (error) {
+    console.error('Failed to initialize Enhanced BrowserAgent:', error);
+    enhancedAgent = null;
+    throw error;
   }
 }
 
@@ -297,6 +319,99 @@ io.on('connection', (socket) => {
       socket.emit('activityUpdate', {
         type: 'error',
         message: `Automation failed: ${error.message}`
+      });
+    }
+  });
+
+  // Enhanced autonomous task execution using Observe → Decide → Act → Evaluate cycle
+  socket.on('startAutonomousTask', async (data) => {
+    try {
+      const { taskDescription, options = {} } = data;
+      
+      socket.emit('activityUpdate', {
+        type: 'info',
+        message: `Starting autonomous task: ${taskDescription}`
+      });
+      
+      // Initialize Enhanced BrowserAgent if not already done
+      if (!enhancedAgent) {
+        socket.emit('activityUpdate', {
+          type: 'info',
+          message: 'Initializing enhanced AI agent...'
+        });
+        
+        await initEnhancedAgent();
+        
+        if (!enhancedAgent) {
+          socket.emit('error', { 
+            message: 'Failed to initialize enhanced agent. Please check your API keys.' 
+          });
+          return;
+        }
+      }
+      
+      socket.emit('activityUpdate', {
+        type: 'success',
+        message: 'Enhanced AI agent ready - starting autonomous execution'
+      });
+      
+      // Set up progress callbacks
+      const progressCallback = (step, progress) => {
+        socket.emit('taskProgress', {
+          step: step.step,
+          action: step.decision?.action,
+          progress: step.evaluation?.taskProgress || 0,
+          confidence: step.evaluation?.confidence || 0,
+          reasoning: step.decision?.reasoning,
+          url: step.observation?.url
+        });
+        
+        socket.emit('activityUpdate', {
+          type: 'info',
+          message: `Step ${step.step}: ${step.decision?.action} - ${step.evaluation?.taskProgress || 0}% complete`
+        });
+      };
+      
+      // Execute the autonomous task
+      const result = await enhancedAgent.executeAutonomousTask(taskDescription, {
+        ...options,
+        progressCallback
+      });
+      
+      // Send completion result
+      socket.emit('taskComplete', {
+        success: result.success,
+        duration: result.duration,
+        stepsCompleted: result.stepsCompleted,
+        finalUrl: result.finalUrl,
+        confidence: result.confidence
+      });
+      
+      socket.emit('activityUpdate', {
+        type: result.success ? 'success' : 'warning',
+        message: result.success 
+          ? `Task completed successfully in ${result.stepsCompleted} steps!`
+          : `Task partially completed (${result.confidence * 100}% confidence)`
+      });
+      
+      // Send detailed step-by-step results for analysis
+      socket.emit('taskAnalysis', {
+        steps: result.steps.map(step => ({
+          step: step.step,
+          action: step.decision.action,
+          reasoning: step.decision.reasoning,
+          success: step.actionResult.success,
+          progress: step.evaluation.taskProgress,
+          confidence: step.evaluation.confidence
+        }))
+      });
+
+    } catch (error) {
+      console.error('Autonomous task error:', error);
+      socket.emit('error', { message: error.message });
+      socket.emit('activityUpdate', {
+        type: 'error',
+        message: `Autonomous task failed: ${error.message}`
       });
     }
   });

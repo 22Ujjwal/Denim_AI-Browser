@@ -170,6 +170,58 @@ socket.on('activityUpdate', (data) => {
     addActivityMessage(message, type);
 });
 
+// New socket events for autonomous task execution
+socket.on('taskProgress', (data) => {
+    const { step, action, progress, confidence, reasoning, url } = data;
+    
+    // Update chat with progress
+    const progressMessage = `Step ${step}: ${action} (${progress}% complete, ${Math.round(confidence * 100)}% confidence)`;
+    addChatMessage(progressMessage, 'ai');
+    
+    // Show reasoning if available
+    if (reasoning) {
+        addChatMessage(`💭 Reasoning: ${reasoning}`, 'ai');
+    }
+    
+    // Update browser view URL if changed
+    if (url && browserView) {
+        browserView.src = url;
+    }
+});
+
+socket.on('taskComplete', (data) => {
+    const { success, duration, stepsCompleted, finalUrl, confidence } = data;
+    
+    isAutomationRunning = false;
+    updateButtons();
+    hideLoading();
+    
+    const durationSeconds = Math.round(duration / 1000);
+    const successMessage = success 
+        ? `✅ Task completed successfully in ${stepsCompleted} steps (${durationSeconds}s)!`
+        : `⚠️ Task partially completed (${Math.round(confidence * 100)}% confidence)`;
+    
+    addChatMessage(successMessage, 'ai');
+    
+    if (finalUrl) {
+        addChatMessage(`🌐 Final page: ${finalUrl}`, 'ai');
+    }
+});
+
+socket.on('taskAnalysis', (data) => {
+    const { steps } = data;
+    
+    // Create a detailed analysis for the user
+    let analysisText = "📊 Task Analysis:\n\n";
+    steps.forEach(step => {
+        analysisText += `Step ${step.step}: ${step.action}\n`;
+        analysisText += `  └ ${step.reasoning}\n`;
+        analysisText += `  └ Success: ${step.success ? '✅' : '❌'}, Progress: ${step.progress}%\n\n`;
+    });
+    
+    addChatMessage(analysisText, 'ai');
+});
+
 // Event listeners
 function initializeEventListeners() {
     // Start automation button
@@ -238,11 +290,52 @@ function processUserMessage(message) {
         return;
     }
     
-    // Default to automation task
+    // Check for autonomous task keywords
+    const autonomousKeywords = [
+        'play', 'search for', 'find', 'book', 'apply', 'buy', 'order', 
+        'download', 'upload', 'fill', 'submit', 'register', 'login',
+        'navigate to', 'go to', 'visit', 'open', 'complete', 'automate'
+    ];
+    
+    const isAutonomousTask = autonomousKeywords.some(keyword => 
+        lowerMessage.includes(keyword)
+    ) || lowerMessage.includes('flight') || lowerMessage.includes('job') || 
+       lowerMessage.includes('music') || lowerMessage.includes('bollywood');
+    
+    if (isAutonomousTask) {
+        // Use Enhanced BrowserAgent for autonomous execution
+        startAutonomousTask(message);
+        return;
+    }
+    
+    // Default to regular automation task
     const urlMatch = message.match(/https?:\/\/[^\s]+/);
     const url = urlMatch ? urlMatch[0] : '';
     
     startAutomationWithTask(message, url);
+}
+
+// Start autonomous task execution using Enhanced BrowserAgent
+function startAutonomousTask(taskDescription) {
+    if (isAutomationRunning) {
+        addChatMessage('I\'m already working on a task. Please wait for it to complete.', 'ai');
+        return;
+    }
+    
+    isAutomationRunning = true;
+    updateButtons();
+    showLoading('Starting autonomous task execution...');
+    
+    addChatMessage(`🚀 Starting autonomous task: "${taskDescription}"`, 'ai');
+    addChatMessage('I will use my Observe → Decide → Act → Evaluate cycle to complete this task step by step.', 'ai');
+    
+    socket.emit('startAutonomousTask', {
+        taskDescription: taskDescription,
+        options: {
+            maxSteps: 20,
+            confidenceThreshold: 0.7
+        }
+    });
 }
 
 function analyzeCurrentPage(instruction) {
