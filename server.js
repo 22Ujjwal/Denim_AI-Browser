@@ -544,7 +544,7 @@ io.on('connection', (socket) => {
     } catch (error) {
       console.error('Autonomous task error:', error);
       
-      // Handle quota exceeded errors specifically
+      // Handle different types of errors specifically
       if (error.code === 'QUOTA_EXCEEDED' || error.message.includes('quota')) {
         socket.emit('error', { 
           message: 'Daily AI quota exceeded. Please try again tomorrow or consider upgrading your Gemini API plan.',
@@ -553,6 +553,33 @@ io.on('connection', (socket) => {
         socket.emit('activityUpdate', {
           type: 'error',
           message: `⚠️ AI quota exceeded - automation paused. Used ${apiCallCount}/${MAX_DAILY_CALLS} calls today.`
+        });
+      } else if (error.message.includes('concurrent sessions limit') || error.message.includes('429')) {
+        socket.emit('error', { 
+          message: 'Browser session limit reached. You can only run one automation at a time on the free plan. Please wait for current sessions to finish or upgrade to a paid plan for more concurrent sessions.',
+          code: 'SESSION_LIMIT_EXCEEDED'
+        });
+        socket.emit('activityUpdate', {
+          type: 'error',
+          message: '🔒 Concurrent session limit reached - please wait for current sessions to finish'
+        });
+      } else if (error.message.includes('Invalid session response') || error.message.includes('Browserbase')) {
+        socket.emit('error', { 
+          message: 'Browser session creation failed. This might be due to concurrent session limits or API issues. Please try again in a moment.',
+          code: 'SESSION_CREATION_FAILED'
+        });
+        socket.emit('activityUpdate', {
+          type: 'error',
+          message: '🌐 Browser session creation failed - retrying may help'
+        });
+      } else if (error.message.includes('API key expired') || error.message.includes('API_KEY_INVALID')) {
+        socket.emit('error', { 
+          message: 'AI API key has expired or is invalid. Please check your Gemini API key configuration.',
+          code: 'API_KEY_EXPIRED'
+        });
+        socket.emit('activityUpdate', {
+          type: 'error',
+          message: '🔑 AI API key expired - please update your configuration'
         });
       } else {
         socket.emit('error', { message: error.message });

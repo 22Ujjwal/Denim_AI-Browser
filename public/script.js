@@ -18,7 +18,7 @@ const imageAnalysis = null; // Removed - analysis panel no longer exists
 const activityLog = null; // Removed - now using chat for activity logs
 const connectionStatus = document.getElementById('connectionStatus');
 const statusText = document.getElementById('statusText');
-const loadingOverlay = document.getElementById('loadingOverlay');
+const statusIndicator = document.getElementById('statusIndicator');
 
 // New Dyna chat elements
 const chatInput = document.getElementById('chatInput');
@@ -77,9 +77,11 @@ socket.on('executionResult', (result) => {
     if (result.success) {
         addLogEntry(`Execution completed: ${result.message}`, 'success');
         addChatMessage(`Task completed successfully! ${result.message}`, 'ai');
+        showStatus('Task completed!', 'ready');
     } else {
         addLogEntry(`Execution failed: ${result.error}`, 'error');
         addChatMessage(`Sorry, I encountered an error: ${result.error}. Let me know if you'd like me to try a different approach.`, 'ai');
+        showStatus('Task failed', 'error');
     }
     hideLoading();
 });
@@ -115,13 +117,22 @@ socket.on('sessionInfo', (data) => {
 socket.on('error', (data) => {
     addLogEntry(`Error: ${data.message}`, 'error');
     
-    // Handle quota exceeded errors specifically
+    // Handle different types of errors specifically
     if (data.code === 'QUOTA_EXCEEDED' || data.message.includes('quota')) {
         addChatMessage(`⚠️ I've reached my daily AI quota limit. This happens when I've analyzed too many requests today. Please try again tomorrow, or consider upgrading the Gemini API plan for more requests.`, 'ai');
         addActivityMessage('Daily AI quota exceeded - automation paused', 'error');
         
         // Fetch and display quota status
         fetchQuotaStatus();
+    } else if (data.code === 'SESSION_LIMIT_EXCEEDED' || data.message.includes('concurrent sessions')) {
+        addChatMessage(`🔒 I can only run one automation at a time on the current plan. Please wait for any running sessions to finish, or consider upgrading to a paid Browserbase plan for more concurrent sessions.`, 'ai');
+        addActivityMessage('Concurrent session limit reached', 'error');
+    } else if (data.code === 'SESSION_CREATION_FAILED' || data.message.includes('session')) {
+        addChatMessage(`🌐 I'm having trouble creating a browser session. This usually happens when there are too many active sessions. Please try again in a moment.`, 'ai');
+        addActivityMessage('Browser session creation failed', 'error');
+    } else if (data.code === 'API_KEY_EXPIRED' || data.message.includes('expired')) {
+        addChatMessage(`🔑 My AI capabilities are temporarily unavailable due to an expired API key. Please contact the administrator to update the configuration.`, 'ai');
+        addActivityMessage('AI API key expired', 'error');
     } else {
         addChatMessage(`I encountered an error: ${data.message}. Please let me know if you'd like me to try again.`, 'ai');
     }
@@ -226,6 +237,13 @@ socket.on('taskComplete', (data) => {
         : `⚠️ Task partially completed (${Math.round(confidence * 100)}% confidence)`;
     
     addChatMessage(successMessage, 'ai');
+    
+    // Show status indicator
+    if (success) {
+        showStatus(`Completed in ${durationSeconds}s!`, 'ready');
+    } else {
+        showStatus(`Partially completed`, 'error');
+    }
     
     if (finalUrl) {
         addChatMessage(`🌐 Final page: ${finalUrl}`, 'ai');
@@ -359,7 +377,7 @@ function startAutonomousTask(taskDescription) {
     
     isAutomationRunning = true;
     updateButtons();
-    showLoading('Starting autonomous task execution...');
+    showLoading('Starting autonomous task...');
     
     addChatMessage(`🚀 Starting autonomous task: "${taskDescription}"`, 'ai');
     addChatMessage('I will use my Observe → Decide → Act → Evaluate cycle to complete this task step by step.', 'ai');
@@ -374,7 +392,7 @@ function startAutonomousTask(taskDescription) {
 }
 
 function analyzeCurrentPage(instruction) {
-    showLoading('Analyzing current page...');
+    showLoading('Analyzing page...');
     addActivityMessage('Starting page analysis with AI', 'info');
     
     socket.emit('analyzePage', {
@@ -576,19 +594,45 @@ function updateConnectionStatus(connected) {
     }
 }
 
-function showLoading(message = 'Processing...') {
-    if (loadingOverlay) {
-        loadingOverlay.style.display = 'flex';
-        const loadingText = loadingOverlay.querySelector('.loading-text');
-        if (loadingText) {
-            loadingText.textContent = message;
+function showLoading(message = 'Dyna is processing...') {
+    if (statusIndicator) {
+        const statusText = statusIndicator.querySelector('.status-text');
+        if (statusText) {
+            statusText.textContent = message;
         }
+        statusIndicator.className = 'status-indicator show processing';
     }
 }
 
 function hideLoading() {
-    if (loadingOverlay) {
-        loadingOverlay.style.display = 'none';
+    if (statusIndicator) {
+        const statusText = statusIndicator.querySelector('.status-text');
+        if (statusText) {
+            statusText.textContent = 'Ready';
+        }
+        statusIndicator.className = 'status-indicator show';
+        
+        // Hide after a short delay
+        setTimeout(() => {
+            statusIndicator.className = 'status-indicator';
+        }, 2000);
+    }
+}
+
+function showStatus(message, type = 'ready') {
+    if (statusIndicator) {
+        const statusText = statusIndicator.querySelector('.status-text');
+        if (statusText) {
+            statusText.textContent = message;
+        }
+        statusIndicator.className = `status-indicator show ${type}`;
+        
+        // Auto-hide after 3 seconds unless it's processing
+        if (type !== 'processing') {
+            setTimeout(() => {
+                statusIndicator.className = 'status-indicator';
+            }, 3000);
+        }
     }
 }
 
