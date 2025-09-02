@@ -2,6 +2,19 @@
 
 A comprehensive browser automation agent that combines **Browserbase Node.js SDK**, **Playwright**, and **Gemini AI** for intelligent web automation with a beautiful glass morphism UI.
 
+![godown](https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExMDk0bXF3ZHE4MmZzZzRiajB4dWY3MDBjMzN0MTc2aTNhNTU0ejZrZSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/Js7cqIkpxFy0bILFFA/giphy.gif)
+
+![SS1](denim1.png)
+
+![SS2](denim2.png)
+
+![SS3](denim3.png)
+
+![SS4](denim4.png)
+
+![Yay!](https://media.giphy.com/media/v1.Y2lkPWVjZjA1ZTQ3aDd4cGVzOGQ1ODNueWtra2I5a29kM3F3MmhkYXNiZXV4cXh1bjcxNyZlcD12MV9naWZzX3JlbGF0ZWQmY3Q9Zw/J1WyRIJrTeKs6R6VHL/giphy.gif)
+
+
 ## ✨ Features
 
 ### 🎨 Modern Glass Morphism UI
